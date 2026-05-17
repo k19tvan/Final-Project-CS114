@@ -14,7 +14,10 @@ def load_and_preprocess_data(dataset_name, config):
     
     if dataset_name == 'ag_news':
         texts = dataset['text'][:n_samples]
-        vectorizer = TfidfVectorizer(stop_words='english', max_features=max_features, sublinear_tf=True)
+        vectorizer = TfidfVectorizer(
+            stop_words='english', 
+            max_features=max_features, 
+            sublinear_tf=True)
     else:
         texts = [f"{str(t)} {str(c)}" for t, c in zip(dataset['title'][:n_samples], dataset['content'][:n_samples])]
         vectorizer = TfidfVectorizer(analyzer='word', ngram_range=(1, 2), max_features=max_features, sublinear_tf=True)
