@@ -1,6 +1,6 @@
 # Machine Learning Classification Pipeline & Robustness Analysis
 
-Dự án này triển khai và so sánh hiệu năng của hai mô hình phân loại chính là **LDA (Linear Discriminant Analysis)** và **SVM (Support Vector Machine)** trên các bộ dữ liệu hình ảnh kinh điển (MNIST, Fashion-MNIST, CIFAR-10). Dự án tập trung vào việc đánh giá độ bền (robustness) của mô hình dưới tác động của nhiễu và khả năng học bán giám sát (Semi-supervised Learning).
+Dự án này triển khai và so sánh hiệu năng của hai mô hình phân loại chính là **LDA (Linear Discriminant Analysis)** và **SVM (Support Vector Machine)** trên các bộ dữ liệu hình ảnh kinh điển (MNIST, Fashion-MNIST, CIFAR-10). Dự án tập trung vào việc đánh giá độ bền (robustness) và độ tin cậy (reliability) của mô hình dưới tác động của nhiễu và các phép biến đổi ảnh (Test-Time Augmentation).
 
 ---
 
@@ -14,8 +14,8 @@ Dự án này triển khai và so sánh hiệu năng của hai mô hình phân l
 │   ├── lda_em.py           # Cài đặt LDA-EM và mã nguồn gốc LDA
 │   ├── utils.py            # Trích xuất HOG, gây nhiễu, tiện ích vẽ đồ thị
 │   ├── experiment1.py      # Baseline & Dimensionality Reduction (PCA)
-│   ├── experiment3.py      # Semi-Supervised Learning (Self-Training, EM)
-│   └── experiment4.py      # Test-Time Augmentation (TTA) & Reliability
+│   ├── experiment2.py      # Độ bền với Nhiễu (Noise Robustness)
+│   └── experiment3.py      # Test-Time Augmentation (TTA) & Reliability
 ├── results/                # Lưu trữ kết quả (CSV, biểu đồ)
 └── readme.md               # Hướng dẫn và thiết lập thí nghiệm
 ```
@@ -53,23 +53,18 @@ Mọi thí nghiệm đều sử dụng đặc trưng **HOG (Histogram of Oriente
   - **Label Noise**: Xác suất đảo nhãn ngẫu nhiên $p \in [0.0, 0.5]$.
   - **Feature Noise**: Nhiễu Gaussian vào đặc trưng HOG với $\sigma \in [0.0, 1.0]$.
 
-### Thí nghiệm 3: Semi-Supervised Learning (SSL)
-- **Mục tiêu**: Tận dụng dữ liệu không nhãn (unlabeled data) khi dữ liệu có nhãn khan hiếm.
-- **Tỉ lệ nhãn (Labeled Ratio)**: `[1%, 5%, 10%, 20%, 50%]`.
-- **Phương pháp so sánh**:
-  - **LDA Self-Training**: Gán nhãn giả (pseudo-label) với threshold tin cậy 0.9.
-  - **SVM Self-Training**: Sử dụng `CalibratedClassifierCV`.
-  - **LDA-EM**: Tối ưu hóa likelihood thông qua bước E và bước M xen kẽ.
-
-### Thí nghiệm 4: Test-Time Augmentation (TTA) & Reliability
-- **Mục tiêu**: Đánh giá hiệu quả của việc tổng hợp kết quả từ nhiều bản sao biến đổi của ảnh test.
+### Thí nghiệm 3: Test-Time Augmentation (TTA) & Reliability
+- **Mục tiêu**: Đánh giá hiệu quả của việc tổng hợp kết quả từ nhiều bản sao biến đổi của ảnh test và so sánh độ tin cậy giữa LDA và SVM trên các kích thước tập huấn luyện khác nhau.
+- **Hai kịch bản huấn luyện**:
+  - **Subset 500**: Huấn luyện trên 500 mẫu (phù hợp/tốt cho LDA).
+  - **Full Dataset**: Huấn luyện trên toàn bộ dữ liệu (phù hợp/tốt cho SVM).
 - **Cấu hình TTA**: 
   - Số lượng bản sao: $N=10$.
-  - **Level 1 (Nhẹ)**: Xoay $\pm 5^\circ$, Dịch $\pm 5\%$, Zoom $\pm 5\%$.
-  - **Level 2 (Vừa)**: Xoay $\pm 15^\circ$, Dịch $\pm 10\%$, Zoom $\pm 10\%$.
-  - **Level 3 (Mạnh)**: Xoay $\pm 30^\circ$, Dịch $\pm 20\%$, Zoom $\pm 20\%$.
-- **Mô hình**: So sánh LDA (Discriminative) và GLA (Generative LDA).
-- **Chỉ số**: TTA Accuracy, Consistency Score (độ nhất quán), ECE (Expected Calibration Error).
+  - **Level 1 (Nhẹ - Low)**: Xoay $\pm 5^\circ$, Dịch $\pm 5\%$, Zoom $\pm 5\%$.
+  - **Level 2 (Vừa - Medium)**: Xoay $\pm 15^\circ$, Dịch $\pm 10\%$, Zoom $\pm 10\%$.
+  - **Level 3 (Mạnh - High)**: Xoay $\pm 30^\circ$, Dịch $\pm 20\%$, Zoom $\pm 20\%$.
+- **Mô hình**: So sánh LDA và SVM (được hiệu chỉnh xác suất bằng CalibratedClassifierCV).
+- **Chỉ số**: Single Accuracy, TTA Accuracy, Consistency Score (độ nhất quán).
 
 ---
 
@@ -81,15 +76,13 @@ Dự án yêu cầu các thư viện: `numpy`, `pandas`, `matplotlib`, `seaborn`
    ```bash
    python main.py --exp 1  # Baseline & PCA
    python main.py --exp 2  # Noise Robustness
-   python main.py --exp 3  # Semi-Supervised Learning
-   python main.py --exp 4  # Test-Time Augmentation
+   python main.py --exp 3  # Test-Time Augmentation
    ```
 
 2. **Chạy tất cả**:
    ```bash
    python main.py --all
    ```
-
 ---
 
 ## 5. Kết quả và Biểu đồ
@@ -97,8 +90,7 @@ Dự án yêu cầu các thư viện: `numpy`, `pandas`, `matplotlib`, `seaborn`
 - **Đồ thị**: 
   - Thí nghiệm 1: Accuracy vs PCA Dimensions.
   - Thí nghiệm 2: Robustness curves (Label & Feature noise).
-  - Thí nghiệm 3: Accuracy vs Labeled Ratio và Convergence curves.
-  - Thí nghiệm 4: TTA Accuracy vs Intensity Levels và Consistency Analysis.
+  - Thí nghiệm 3: TTA Accuracy vs Intensity Levels across Train Sizes (LDA vs SVM).
 
 ---
 **Ghi chú kỹ thuật**: Mô hình LDA sử dụng thuật toán **Shrinkage** (Ledoit-Wolf) để khắc phục hiện tượng ma trận hiệp phương sai bị suy biến khi số lượng mẫu ít hơn số lượng đặc trưng.

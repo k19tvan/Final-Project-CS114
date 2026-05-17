@@ -4,227 +4,198 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import random
+from skimage.transform import rotate, AffineTransform, warp
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
 from src.data_loader import load_dataset
 from src.models import LDAClassifier_wrapper, SVMClassifier_wrapper
-from src.lda_em import LinearDiscriminantAnalysis, LDA_EM
 from src.utils import extract_hog_features, save_plot
+
+def augment_image(image, intensity='medium'):
+    if intensity == 'low':
+        rot, trans, zoom = random.uniform(-5, 5), (random.uniform(-0.05, 0.05), random.uniform(-0.05, 0.05)), random.uniform(0.95, 1.05)
+    elif intensity == 'medium':
+        rot, trans, zoom = random.uniform(-15, 15), (random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1)), random.uniform(0.9, 1.1)
+    else: # high
+        rot, trans, zoom = random.uniform(-30, 30), (random.uniform(-0.2, 0.2), random.uniform(-0.2, 0.2)), random.uniform(0.8, 1.2)
+
+    img_2d = image[:, :, 0] if len(image.shape) == 3 and image.shape[2] == 1 else image
+    aug_img = rotate(img_2d, rot, mode='edge')
+    h, w = img_2d.shape
+    t_x, t_y = trans[0] * w, trans[1] * h
+    c_x, c_y = w / 2, h / 2
+    shift_x, shift_y = c_x - c_x * zoom, c_y - c_y * zoom
+    tf = AffineTransform(translation=(t_x + shift_x, t_y + shift_y), scale=(zoom, zoom))
+    aug_img = warp(aug_img, tf.inverse, mode='edge')
+    return aug_img[:, :, np.newaxis] if len(image.shape) == 3 and image.shape[2] == 1 else aug_img
+
+def get_tta_predictions(images, model, scaler, pixels_per_cell, cells_per_block, orientations, n_augmentations=10, intensity='medium', use_scaler=False):
+    """
+    Đánh giá TTA đảm bảo không làm lệch nhãn.
+    """
+    all_probs = []
+    all_single_preds = []
+    all_consistency = []
+    
+    # Không shuffle ở đây để giữ đúng thứ tự với nhãn truyền vào
+    for i in range(len(images)):
+        img = images[i]
+        
+        # 1. Dự đoán đơn (Single)
+        feat_single = extract_hog_features(np.array([img]), pixels_per_cell, cells_per_block, orientations)
+        if use_scaler and scaler:
+            feat_single = scaler.transform(feat_single)
+        
+        prob_single = model.predict_proba(feat_single)[0]
+        pred_single = np.argmax(prob_single)
+        all_single_preds.append(pred_single)
+        
+        # 2. Dự đoán TTA
+        tta_probs = []
+        tta_preds = []
+        for _ in range(n_augmentations):
+            aug_img = augment_image(img, intensity)
+            feat_aug = extract_hog_features(np.array([aug_img]), pixels_per_cell, cells_per_block, orientations)
+            if use_scaler and scaler:
+                feat_aug = scaler.transform(feat_aug)
+            
+            p = model.predict_proba(feat_aug)[0]
+            tta_probs.append(p)
+            tta_preds.append(np.argmax(p))
+            
+        all_probs.append(np.mean(tta_probs, axis=0))
+        all_consistency.append(np.mean(np.array(tta_preds) == pred_single))
+        
+        if (i+1) % 100 == 0:
+            print(f"        Processed {i+1}/{len(images)} samples...")
+            
+    return np.array(all_probs), np.array(all_single_preds), np.array(all_consistency)
+
+def visualize_tta_samples(image, intensity, dataset_name, output_dir):
+    """
+    Visualize original image and its 10 augmented versions.
+    """
+    n_augmentations = 10
+    plt.figure(figsize=(15, 5))
+    
+    # Original
+    plt.subplot(2, 6, 1)
+    img_display = image[:, :, 0] if len(image.shape) == 3 and image.shape[2] == 1 else image
+    plt.imshow(img_display, cmap='gray')
+    plt.title("Original")
+    plt.axis('off')
+    
+    # Augmented versions
+    for i in range(n_augmentations):
+        aug_img = augment_image(image, intensity)
+        aug_display = aug_img[:, :, 0] if len(aug_img.shape) == 3 and aug_img.shape[2] == 1 else aug_img
+        plt.subplot(2, 6, i + 2)
+        plt.imshow(aug_display, cmap='gray')
+        plt.title(f"Aug {i+1}")
+        plt.axis('off')
+        
+    plt.suptitle(f"TTA Augmentations - Intensity: {intensity.upper()} ({dataset_name.upper()})")
+    plt.tight_layout()
+    save_plot(f"tta_samples_{intensity}.png", directory=output_dir)
 
 def run_experiment_3_on_dataset(dataset_name):
     print(f"\n" + "="*60)
-    print(f"🚀 BẮT ĐẦU THÍ NGHIỆM 3: SEMI-SUPERVISED LEARNING TRÊN {dataset_name.upper()}")
+    print(f"🚀 BẮT ĐẦU THÍ NGHIỆM 3: TTA & RELIABILITY (LDA VS SVM) TRÊN {dataset_name.upper()}")
     print("="*60)
     
-    start_total_time = time.time()
-    
-    # 1. Load data
-    print(f"[1/5] Đang tải dữ liệu {dataset_name}...")
     (train_X, train_y), (test_X, test_y) = load_dataset(dataset_name)
-    
     pixels_per_cell = (7, 7) if dataset_name in ['mnist', 'fashion_mnist'] else (8, 8)
-    cells_per_block = (2, 2)
-    orientations = 9
+    cells_per_block, orientations = (2, 2), 9
     
-    # 2. Extract HOG
-    print(f"[2/5] Đang trích xuất đặc trưng HOG...")
-    t0 = time.time()
-    train_X_hog = extract_hog_features(train_X, pixels_per_cell, cells_per_block, orientations)
-    test_X_hog = extract_hog_features(test_X, pixels_per_cell, cells_per_block, orientations)
-    print(f"      -> Trích xuất xong. Thời gian: {time.time() - t0:.2f}s")
-    
-    LABELED_RATIOS = [0.01, 0.05, 0.1, 0.2, 0.5]
-    N_RUNS = 5
-    
-    results = []
-    convergence_data = []
+    # Sử dụng toàn bộ tập test
+    X_test_sub = test_X
+    y_test_sub = test_y
 
-    print(f"[3/5] Bắt đầu huấn luyện và đánh giá mô hình...")
-    for run in range(N_RUNS):
-        print(f"\n  ▶ RUN {run+1}/{N_RUNS}")
+    print(f"[1/4] Trích xuất đặc trưng HOG cho tập train...")
+    train_X_hog = extract_hog_features(train_X, pixels_per_cell, cells_per_block, orientations)
+    
+    setups = [
+        {'name': 'subset500', 'size': 500},
+        {'name': 'full', 'size': None}
+    ]
+    
+    intensities = ['low', 'medium', 'high']
+    results = []
+    
+    for setup in setups:
+        case_name = setup['name']
+        subset_size = setup['size']
+        print(f"\n" + "-"*50)
+        print(f"▶ ĐANG CHẠY CASE: {case_name.upper()} (Train Size: {subset_size if subset_size else 'All'})")
+        print("-"*50)
         
-        for ratio in LABELED_RATIOS:
-            print(f"    Labeled Ratio: {ratio*100:.0f}%")
-            
-            # Split labeled/unlabeled from full train set
-            X_labeled, X_unlabeled, y_labeled, _ = train_test_split(
-                train_X_hog, train_y, train_size=ratio, stratify=train_y, random_state=run
+        if subset_size is None:
+            X_subset_hog, y_subset = train_X_hog, train_y
+        else:
+            X_subset_hog, _, y_subset, _ = train_test_split(
+                train_X_hog, train_y,
+                train_size=subset_size,
+                stratify=train_y,
+                random_state=42
             )
             
-            # Scale features (ONLY for SVM)
-            scaler = StandardScaler()
-            X_l_scaled = scaler.fit_transform(X_labeled)
-            X_t_scaled_svm = scaler.transform(test_X_hog)
+        # LDA
+        print("      >> Training LDA model...")
+        lda = LDAClassifier_wrapper()
+        lda.fit(X_subset_hog, y_subset)
+        print("      >> LDA trained.")
+        
+        # SVM
+        print("      >> Training SVM model (with Calibration)...")
+        scaler = StandardScaler()
+        train_X_scaled = scaler.fit_transform(X_subset_hog)
+        base_svm = SVMClassifier_wrapper().model
+        svm_calibrated = CalibratedClassifierCV(base_svm, cv=3)
+        svm_calibrated.fit(train_X_scaled, y_subset)
+        print("      >> SVM trained.")
+        
+        for intensity in intensities:
+            print(f"\n  Intensity Level: {intensity.upper()}")
+            
+            # LDA TTA
+            print(f"      [LDA] Evaluating Test-Time Augmentation...")
+            probs_l, preds_s_l, consist_l = get_tta_predictions(X_test_sub, lda, None, pixels_per_cell, cells_per_block, orientations, intensity=intensity, use_scaler=False)
+            acc_s_l, acc_t_l = np.mean(preds_s_l == y_test_sub), np.mean(np.argmax(probs_l, axis=1) == y_test_sub)
+            results.append({'Train_Size': case_name, 'Intensity': intensity, 'Method': 'LDA', 'Single_Acc': acc_s_l, 'TTA_Acc': acc_t_l, 'Consistency': np.mean(consist_l)})
+            
+            # SVM TTA
+            print(f"      [SVM] Evaluating Test-Time Augmentation...")
+            probs_s, preds_s_s, consist_s = get_tta_predictions(X_test_sub, svm_calibrated, scaler, pixels_per_cell, cells_per_block, orientations, intensity=intensity, use_scaler=True)
+            acc_s_s, acc_t_s = np.mean(preds_s_s == y_test_sub), np.mean(np.argmax(probs_s, axis=1) == y_test_sub)
+            results.append({'Train_Size': case_name, 'Intensity': intensity, 'Method': 'SVM', 'Single_Acc': acc_s_s, 'TTA_Acc': acc_t_s, 'Consistency': np.mean(consist_s)})
+            
+            print(f"      Acc -> LDA ({case_name}) -> Single: {acc_s_l:.4f}, TTA: {acc_t_l:.4f}, Consist: {np.mean(consist_l):.4f}")
+            print(f"      Acc -> SVM ({case_name}) -> Single: {acc_s_s:.4f}, TTA: {acc_t_s:.4f}, Consist: {np.mean(consist_s):.4f}")
 
-            # --- 1. Baseline: Supervised LDA ---
-            # LDA uses raw HOG features (unscaled)
-            lda_sup = LDAClassifier_wrapper()
-            lda_sup.fit(X_labeled, y_labeled)
-            acc_lda_sup = lda_sup.score(test_X_hog, test_y)
-            results.append({'Run': run, 'Ratio': ratio, 'Method': 'LDA (Supervised)', 'Accuracy': acc_lda_sup})
-
-            # --- 2. Baseline: Supervised SVM ---
-            # SVM uses scaled features
-            svm_sup = SVMClassifier_wrapper()
-            svm_sup.train(X_l_scaled, y_labeled)
-            acc_svm_sup = svm_sup.evaluate(X_t_scaled_svm, test_y)
-            results.append({'Run': run, 'Ratio': ratio, 'Method': 'SVM (Supervised)', 'Accuracy': acc_svm_sup})
-
-            # --- 3. LDA Self-Training ---
-            # Uses raw features
-            X_l_curr = X_labeled.copy()
-            y_l_curr = y_labeled.copy()
-            X_u_curr = X_unlabeled.copy()
-            X_t_curr = test_X_hog
-            
-            for iter in range(10):
-                clf = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
-                clf.fit(X_l_curr, y_l_curr)
-                
-                probs = clf.predict_proba(X_u_curr)
-                max_probs = np.max(probs, axis=1)
-                high_conf_mask = max_probs >= 0.9
-                
-                n_added = np.sum(high_conf_mask)
-                if n_added < 10:
-                    break
-                
-                pseudo_labels = np.argmax(probs[high_conf_mask], axis=1)
-                X_l_curr = np.vstack([X_l_curr, X_u_curr[high_conf_mask]])
-                y_l_curr = np.concatenate([y_l_curr, pseudo_labels])
-                X_u_curr = X_u_curr[~high_conf_mask]
-                
-                if ratio == 0.05 and run == 0:
-                    convergence_data.append({'Iter': iter, 'Value': n_added, 'Method': 'LDA Self-Training', 'Metric': 'Pseudo-labels Added'})
-                
-                if X_u_curr.shape[0] == 0:
-                    break
-            
-            # Final eval for LDA Self-Training
-            final_clf = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
-            final_clf.fit(X_l_curr, y_l_curr)
-            acc_lda_st = np.mean(final_clf.predict(X_t_curr) == test_y)
-            results.append({'Run': run, 'Ratio': ratio, 'Method': 'LDA Self-Training', 'Accuracy': acc_lda_st})
-
-            # --- 4. SVM Self-Training ---
-            # Reset current sets for SVM (using scaled)
-            X_l_curr_svm = X_l_scaled.copy()
-            y_l_curr_svm = y_labeled.copy()
-            X_u_curr_svm = scaler.transform(X_unlabeled)
-            X_t_curr_svm = X_t_scaled_svm
-            
-            for iter in range(10):
-                base_svm = SVMClassifier_wrapper().model
-                # Calibration needed for probabilities
-                clf = CalibratedClassifierCV(base_svm, cv=3)
-                clf.fit(X_l_curr_svm, y_l_curr_svm)
-                
-                probs = clf.predict_proba(X_u_curr_svm)
-                max_probs = np.max(probs, axis=1)
-                high_conf_mask = max_probs >= 0.9
-                
-                n_added = np.sum(high_conf_mask)
-                if n_added < 10:
-                    break
-                
-                pseudo_labels = np.argmax(probs[high_conf_mask], axis=1)
-                X_l_curr_svm = np.vstack([X_l_curr_svm, X_u_curr_svm[high_conf_mask]])
-                y_l_curr_svm = np.concatenate([y_l_curr_svm, pseudo_labels])
-                X_u_curr_svm = X_u_curr_svm[~high_conf_mask]
-                
-                if ratio == 0.05 and run == 0:
-                    convergence_data.append({'Iter': iter, 'Value': n_added, 'Method': 'SVM Self-Training', 'Metric': 'Pseudo-labels Added'})
-                
-                if X_u_curr_svm.shape[0] == 0:
-                    break
-            
-            acc_svm_st = np.mean(clf.predict(X_t_curr_svm) == test_y)
-            results.append({'Run': run, 'Ratio': ratio, 'Method': 'SVM Self-Training', 'Accuracy': acc_svm_st})
-
-            # --- 5. LDA-EM ---
-            # EM also uses raw features
-            lda_em = LDA_EM(alpha=0.5, max_iter=50, tol=1e-4)
-            X_u_sub = X_unlabeled[:10000] if X_unlabeled.shape[0] > 10000 else X_unlabeled
-            lda_em.fit(X_labeled, y_labeled, X_u_sub)
-            
-            acc_lda_em = np.mean(lda_em.predict(test_X_hog) == test_y)
-            results.append({'Run': run, 'Ratio': ratio, 'Method': 'LDA-EM', 'Accuracy': acc_lda_em})
-            
-            print(f"      Acc -> LDA: {acc_lda_sup:.4f}, SVM: {acc_svm_sup:.4f}, LDA-ST: {acc_lda_st:.4f}, SVM-ST: {acc_svm_st:.4f}, EM: {acc_lda_em:.4f}")
-            
-            if ratio == 0.05 and run == 0:
-                for i, ll in enumerate(lda_em.convergence_log_likelihood):
-                    convergence_data.append({'Iter': i, 'Value': ll, 'Method': 'LDA-EM', 'Metric': 'Log-Likelihood'})
-
-    # 4. Lưu kết quả và vẽ biểu đồ
-    output_dir = 'results/experiment3'
+    # 4. Lưu và Vẽ biểu đồ
+    output_dir = os.path.join('results/experiment3', dataset_name)
     os.makedirs(output_dir, exist_ok=True)
     
-    df = pd.DataFrame(results)
-    df.to_csv(os.path.join(output_dir, f"experiment3_{dataset_name}_results.csv"), index=False)
+    # Visualize samples for each intensity
+    for intensity in intensities:
+        visualize_tta_samples(test_X[0], intensity, dataset_name, output_dir)
+        
+    df_results = pd.DataFrame(results)
+    df_results.to_csv(os.path.join(output_dir, f"experiment3_{dataset_name}_results.csv"), index=False)
     
-    # Plot 1: Accuracy vs Labeled Ratio
-    plt.figure(figsize=(10, 6))
-    sns.lineplot(data=df, x='Ratio', y='Accuracy', hue='Method', marker='o', errorbar='sd')
-    plt.title(f'Semi-Supervised Learning Accuracy on {dataset_name.upper()}')
-    plt.xlabel('Labeled Data Ratio')
-    plt.ylabel('Test Accuracy')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    save_plot(f"experiment3_{dataset_name}_accuracy.png", directory=output_dir)
-    
-    # Plot 2: Delta Accuracy
-    # Calculate improvement over supervised baseline
-    df_mean = df.groupby(['Ratio', 'Method'])['Accuracy'].mean().unstack()
-    df_delta = pd.DataFrame()
-    df_delta['Ratio'] = df_mean.index
-    df_delta['LDA Self-Training'] = df_mean['LDA Self-Training'].values - df_mean['LDA (Supervised)'].values
-    df_delta['LDA-EM'] = df_mean['LDA-EM'].values - df_mean['LDA (Supervised)'].values
-    df_delta['SVM Self-Training'] = df_mean['SVM Self-Training'].values - df_mean['SVM (Supervised)'].values
-    
-    df_delta_melted = df_delta.melt(id_vars='Ratio', var_name='Method', value_name='Delta Accuracy')
+    # Tạo cột kết hợp Method và Train_Size để vẽ biểu đồ lineplot rõ ràng
+    df_results['Method_TrainSize'] = df_results['Method'] + ' (' + df_results['Train_Size'] + ')'
     
     plt.figure(figsize=(10, 6))
-    sns.lineplot(data=df_delta_melted, x='Ratio', y='Delta Accuracy', hue='Method', marker='s')
-    plt.axhline(0, color='red', linestyle='--')
-    plt.title(f'Improvement over Supervised Baseline ({dataset_name.upper()})')
-    plt.xlabel('Labeled Data Ratio')
-    plt.ylabel('Delta Accuracy')
-    plt.grid(True, alpha=0.3)
+    sns.lineplot(data=df_results, x='Intensity', y='TTA_Acc', hue='Method_TrainSize', style='Method', marker='o', markers=True)
+    plt.title(f'TTA Accuracy: LDA vs SVM across Train Sizes ({dataset_name.upper()})')
+    plt.xlabel('Augmentation Intensity')
+    plt.ylabel('TTA Accuracy')
+    plt.legend(title='Method (Train Size)', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    save_plot(f"experiment3_{dataset_name}_delta.png", directory=output_dir)
-    
-    # Plot 3: Convergence curves (Ratio 5%)
-    conv_df = pd.DataFrame(convergence_data)
-    
-    # Self-training convergence
-    st_conv = conv_df[conv_df['Metric'] == 'Pseudo-labels Added']
-    if not st_conv.empty:
-        plt.figure(figsize=(10, 6))
-        sns.lineplot(data=st_conv, x='Iter', y='Value', hue='Method', marker='o')
-        plt.title(f'Self-Training Convergence (Ratio=5%, {dataset_name.upper()})')
-        plt.xlabel('Iteration')
-        plt.ylabel('Number of Pseudo-labels Added')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        save_plot(f"experiment3_{dataset_name}_st_convergence.png", directory=output_dir)
-    
-    # EM convergence
-    em_conv = conv_df[conv_df['Method'] == 'LDA-EM']
-    if not em_conv.empty:
-        plt.figure(figsize=(10, 6))
-        sns.lineplot(data=em_conv, x='Iter', y='Value', marker='o')
-        plt.title(f'LDA-EM Log-Likelihood Convergence (Ratio=5%, {dataset_name.upper()})')
-        plt.xlabel('Iteration')
-        plt.ylabel('Log-Likelihood')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        save_plot(f"experiment3_{dataset_name}_em_convergence.png", directory=output_dir)
-
-    total_time = time.time() - start_total_time
-    print(f"\n✅ Hoàn thành Experiment 3 trên {dataset_name.upper()}! (Tổng thời gian: {total_time/60:.2f} phút)")
+    save_plot(f"experiment3_{dataset_name}_tta_accuracy.png", directory=output_dir)
 
 def run_experiment_3():
     for ds in ['mnist', 'fashion_mnist', 'cifar10']:
