@@ -1,8 +1,10 @@
+
 import numpy as np
 import os
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import Binarizer
+from tqdm import tqdm  # Thêm thư viện tqdm
 from src.text_visualization import plot_with_std
 
 def inject_label_noise(y, noise_level):
@@ -36,7 +38,7 @@ def run_exp_noise(models, X_tf, X_bin, y, dataset_name, config):
     label_levels = config["EXP2_LABEL_NOISE"]
     results_label = {name: ([], []) for name in models.keys()}
     
-    for lvl in label_levels:
+    for lvl in tqdm(label_levels, desc="Label Noise Levels", unit="lvl"):
         for name, (model, f_type) in models.items():
             X_use = X_sub_tf if f_type == 'tfidf' else X_sub_bin
             fold_accs = []
@@ -50,7 +52,7 @@ def run_exp_noise(models, X_tf, X_bin, y, dataset_name, config):
             results_label[name][0].append(np.mean(fold_accs))
             results_label[name][1].append(np.std(fold_accs))
             
-    save_path_label = os.path.join(plot_dir, f"{dataset_name.replace(' ', '_')}_Label_Noise.png")
+    save_path_label = os.path.join(plot_dir, f"{dataset_name.replace(' ', '_')}_Label_Noise_{subset_size}.png")
     plot_with_std(results_label, label_levels, 'Label Noise Ratio', f'Label Noise Robustness ({dataset_name})', save_path_label)
 
     # 2B: FEATURE NOISE
@@ -58,7 +60,7 @@ def run_exp_noise(models, X_tf, X_bin, y, dataset_name, config):
     feature_levels = config["EXP2_FEATURE_NOISE"]
     results_feature = {name: ([], []) for name in models.keys()}
     
-    for sigma in feature_levels:
+    for sigma in tqdm(feature_levels, desc="Feature Noise Levels", unit="sigma"):
         for name, (model, f_type) in models.items():
             X_use = X_sub_tf if f_type == 'tfidf' else X_sub_bin
             fold_accs = []
@@ -77,5 +79,5 @@ def run_exp_noise(models, X_tf, X_bin, y, dataset_name, config):
             results_feature[name][0].append(np.mean(fold_accs))
             results_feature[name][1].append(np.std(fold_accs))
             
-    save_path_feat = os.path.join(plot_dir, f"{dataset_name.replace(' ', '_')}_Feature_Noise.png")
+    save_path_feat = os.path.join(plot_dir, f"{dataset_name.replace(' ', '_')}_Feature_Noise_{subset_size}.png")
     plot_with_std(results_feature, feature_levels, 'Gaussian Noise Std (Sigma)', f'Feature Noise Robustness ({dataset_name})', save_path_feat)
