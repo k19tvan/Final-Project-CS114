@@ -1,6 +1,8 @@
+
 import numpy as np
 import os
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from tqdm import tqdm  # Thêm thư viện tqdm
 from src.text_visualization import plot_with_std
 
 def run_exp_size(models, X_tf, X_bin, y, dataset_name, config):
@@ -14,7 +16,7 @@ def run_exp_size(models, X_tf, X_bin, y, dataset_name, config):
     results = {name: ([], []) for name in models.keys()}
     cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=seed)
     
-    for s in sizes:
+    for s in tqdm(sizes, desc=f"Evaluating Sizes for {dataset_name}", unit="size"):
         X_tr_tf, _, y_tr, _ = train_test_split(X_tf, y, train_size=s, stratify=y, random_state=seed)
         X_tr_bin, _, _, _ = train_test_split(X_bin, y, train_size=s, stratify=y, random_state=seed)
         
